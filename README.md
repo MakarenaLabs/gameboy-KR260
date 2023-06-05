@@ -43,7 +43,7 @@ To load a new Game Boy cartridge, generate the COE file and load it via Vivado i
 
 For VGA output, you can use a PMOD VGA adapter. We recommend using [this PMOD VGA adapter](https://digilent.com/shop/pmod-vga-video-graphics-array/) by Digilent. Connect the PMOD VGA adapter to the PMOD 3-4 ports.
 
-The audio output is mapped on PMOD 1 on pin 1 (left channel) and pin 2 (right channel).
+The audio output is mapped on PMOD 2 on pin 1 (left channel) and pin 2 (right channel).
 
 To map the joystick pins, replace the constant IP [0:7] with the desired PMOD pins.
 The joystick mapping is the following:
