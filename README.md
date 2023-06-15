@@ -56,8 +56,8 @@ The audio output is mapped on PMOD 2 on pin 1 (left channel) and pin 2 (right ch
 To map the joystick pins, replace the constant IP [0:7] with the desired PMOD pins.
 The joystick mapping is the following:
 - 0: A 
-- 1: SELECT
-- 2: B
+- 1: B
+- 2: SELECT
 - 3: START
 - 4: DX
 - 5: SX
