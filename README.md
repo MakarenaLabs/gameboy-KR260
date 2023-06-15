@@ -28,12 +28,20 @@ The project directory has the following structure:
 - `sources`: contains the project sources.
 - `tools`: contains scripts for converting a Game Boy ROM file to COE format for loading the ROM into the Cartridge IP.
 
-## Loading a New Cartridge
+## Static load or real cartridge load
+The project supports both static ROM load (adding the ROM file to the Cartridge IP, see the tutorial below) both real cartridge load. The cartridge load needs a original Game Boy cartridge and a custom adapter for the Raspberry PI pinout of the KR260 (see the constraint file).
+For switching the 2 load mode, simply comment or decomment the line 23 of the top.v file (that is a define for 2 different block of Verilog code).
+
+![Hardware configuration for real cartridge](assets/configuration.jpg)
+![R-Type game loaded from real cartridge](assets/r-type.jpg)
+
+
+## Loading a New Cartridge statically
 
 ![Tobu Tobu deluxe](assets/Tobu_Tobu_Girl_Deluxe.webp)
 
 
-To load a new Game Boy cartridge, generate the COE file and load it via Vivado interface. Follow these steps:
+To load a new Game Boy cartridge statically, generate the COE file and load it via Vivado interface. Follow these steps:
 
 1. Generate the COE file using the provided tools/scripts.
 2. Extract the number of lines of the .hex file and set it on the "Cartridge" IP ROM size. 

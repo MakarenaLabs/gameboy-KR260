@@ -1,25 +1,25 @@
-`timescale 1ns / 1ps
+`timescale 1ns / 1ns
 //////////////////////////////////////////////////////////////////////////////////
-// Company: 
+// Company:
 // Engineer: Wenting Zhang
-// 
-// Create Date:    18:48:36 02/14/2018 
-// Design Name: 
-// Module Name:    ppu 
-// Project Name: 
-// Target Devices: 
-// Tool versions: 
-// Description: 
+//
+// Create Date:    18:48:36 02/14/2018
+// Design Name:
+// Module Name:    ppu
+// Project Name:
+// Target Devices:
+// Tool versions:
+// Description:
 //   GameBoy PPU
-// Additional Comments: 
-//   There are three hardware layers in the GameBoy PPU: Background, Window, and 
+// Additional Comments:
+//   There are three hardware layers in the GameBoy PPU: Background, Window, and
 //   Object (or sprites).
 //
 //   Window will render above the background and the object can render above the
 //   background or under the background. Each object have a priority bit to
 //   indicate where it should be rendered.
 //
-//   Background, Window, and Object can be individually turned on or off. When 
+//   Background, Window, and Object can be individually turned on or off. When
 //   nothing is turned on, it displays white.
 //
 //   The whole render logic does NOT require a scanline buffer to work, and it
@@ -28,22 +28,22 @@
 //   There are two main parts of the logic, implemented in a big FSM. The first
 //   one is the fetch unit, and the other is the pixel FIFO.
 //
-//   The pixel FIFO shifts out one pixel when it contains more than 8 pixels, the 
+//   The pixel FIFO shifts out one pixel when it contains more than 8 pixels, the
 //   fetch unit would generally render 8 pixels in 6 cycles (so 2 wait cycles are
 //   inserted so they are in sync generally). When there is no enough pixels,
 //   the FIFO would stop and wait for the fetch unit.
 //
 //   Windows Trigger is handled in the next state logic, there is a distinct state
-//   for the PPU to switch from background rendering to window rendering (flush 
+//   for the PPU to switch from background rendering to window rendering (flush
 //   the fifo and add wait cycles.)
 //
-//   Object Trigger is handled in the state change block, in order to backup the 
+//   Object Trigger is handled in the state change block, in order to backup the
 //   previous state. Current RAM address is also backed up during the handling of
 //   object rendering. Once all the objects at this position has been rendered,
 //   the render state machine could be restored to its previous state.
 //
 //   The output pixel clock is the inverted main clock, which is the same as the
-//   real Game Boy Pixel data would be put on the pixel bus on the negedge of 
+//   real Game Boy Pixel data would be put on the pixel bus on the negedge of
 //   clock, so the LCD would latch the data on the posedge. The original Game Boy
 //   used a gated clock to control if output is valid. Since gated clock is not
 //   recommend, I used a valid signal to indicate is output should be considered
@@ -53,15 +53,30 @@
 module ppu(
     input clk,
     input rst,
-    input [15:0] a,
-    output reg [7:0] dout,
-    input [7:0] din,
-    input rd,
-    input wr,
+    // MMIO Bus, 0xFF40 - 0xFF4B, always visible to CPU
+    input wire [15:0] mmio_a,
+    output reg [7:0]  mmio_dout,
+    input wire [7:0]  mmio_din,
+    input wire        mmio_rd,
+    input wire        mmio_wr,
+    // VRAM Bus, 0x8000 - 0x9FFF
+    input wire [15:0] vram_a,
+    output wire [7:0] vram_dout,
+    input wire [7:0]  vram_din,
+    input wire        vram_rd,
+    input wire        vram_wr,
+    // OAM Bus,  0xFE00 - 0xFE9F
+    input wire [15:0] oam_a,
+    output wire [7:0] oam_dout,
+    input wire [7:0]  oam_din,
+    input wire        oam_rd,
+    input wire        oam_wr,
+    // Interrupt interface
     output reg int_vblank_req,
     output reg int_lcdc_req,
     input int_vblank_ack,
     input int_lcdc_ack,
+    // Pixel output
     output cpl, // Pixel Clock, = ~clk
     output reg [1:0] pixel, // Pixel Output
     output reg valid, // Pixel Valid
@@ -70,12 +85,14 @@ module ppu(
     //Debug output
     output [7:0] scx,
     output [7:0] scy,
-    output [4:0] state
+    output [4:0] state,
+    output [7:0] d_reg_lcdc,
+    output [7:0] d_reg_stat
     );
-    
+
     // Global Wires ?
     integer i;
-    
+
     // PPU registers
     reg [7:0] reg_lcdc; //$FF40 LCD Control (R/W)
     reg [7:0] reg_stat; //$FF41 LCDC Status (R/W)
@@ -89,11 +106,11 @@ module ppu(
     reg [7:0] reg_obp1; //$FF49 Object Palette 1 Data (R/W) Non-CGB mode only
     reg [7:0] reg_wy;   //$FF4A Window Y Position (R/W)
     reg [7:0] reg_wx;   //$FF4B Window X Position (R/W)
-    
+
     // Some interrupt related register
     reg [7:0] reg_ly_last;
     reg [1:0] reg_mode_last; // Next mode based on next state
-    
+
     wire reg_lcd_en = reg_lcdc[7];          //0=Off, 1=On
     wire reg_win_disp_sel = reg_lcdc[6];    //0=9800-9BFF, 1=9C00-9FFF
     wire reg_win_en = reg_lcdc[5];          //0=Off, 1=On
@@ -108,41 +125,37 @@ module ppu(
     wire reg_hblank_int = reg_stat[3];
     wire reg_coin_flag = reg_stat[2];
     wire [1:0] reg_mode = reg_stat[1:0];
-    
+
     localparam PPU_MODE_H_BLANK    = 2'b00;
     localparam PPU_MODE_V_BLANK    = 2'b01;
     localparam PPU_MODE_OAM_SEARCH = 2'b10;
     localparam PPU_MODE_PIX_TRANS  = 2'b11;
-    
+
     localparam PPU_PAL_BG  = 2'b00;
     localparam PPU_PAL_OB0 = 2'b01;
     localparam PPU_PAL_OB1 = 2'b10;
-    
+
     reg [12:0] vram_addr_bg;
     reg [12:0] vram_addr_obj;
     wire [12:0] vram_addr_int;
     wire [12:0] vram_addr_ext;
     wire vram_addr_int_sel; // 0 - BG, 1 - OBJ
-    
+
     assign vram_addr_int = (vram_addr_int_sel == 1'b1) ? (vram_addr_obj) : (vram_addr_bg);
-    
-    wire addr_in_ppu  = (a >= 16'hFF40 && a <= 16'hFF4B);
-    wire addr_in_vram = (a >= 16'h8000 && a <= 16'h9FFF);
-    wire addr_in_oam  = (a >= 16'hFE00 && a <= 16'hFE9F);
-    
+
     wire vram_access_ext = ((reg_mode == PPU_MODE_H_BLANK)||
                             (reg_mode == PPU_MODE_V_BLANK)||
                             (reg_mode == PPU_MODE_OAM_SEARCH));
     wire vram_access_int = ~vram_access_ext;
     wire oam_access_ext = ((reg_mode == PPU_MODE_H_BLANK)||
                            (reg_mode == PPU_MODE_V_BLANK));
-    
+
     wire [12:0] window_map_addr = (reg_win_disp_sel) ? (13'h1C00) : (13'h1800);
     wire [12:0] bg_map_addr = (reg_bg_disp_sel) ? (13'h1C00) : (13'h1800);
     wire [12:0] bg_window_tile_addr = (reg_bg_win_data_sel) ? (13'h0000) : (13'h0800);
-    
+
     // PPU Memories
-    
+
     // 8 bit WR, 16 bit RD, 160Bytes OAM
     reg [7:0] oam_u [0: 79];
     reg [7:0] oam_l [0: 79];
@@ -153,7 +166,7 @@ module ppu(
     wire [7:0] oam_data_out_byte;
     wire [7:0] oam_data_in;
     wire oam_we;
-    
+
     always @ (negedge clk)
     begin
         if (oam_we) begin
@@ -166,20 +179,21 @@ module ppu(
             oam_data_out <= {oam_u[oam_rd_addr[7:1]], oam_l[oam_rd_addr[7:1]]};
         end
     end
-    
-    assign oam_wr_addr = a[7:0];
-    assign oam_rd_addr = (oam_access_ext) ? (a[7:0]) : (oam_rd_addr_int); 
-    assign oam_data_in = din;
+
+    assign oam_wr_addr = oam_a[7:0];
+    assign oam_rd_addr = (oam_access_ext) ? (oam_a[7:0]) : (oam_rd_addr_int);
+    assign oam_data_in = oam_din;
     assign oam_data_out_byte = (oam_rd_addr[0]) ? oam_data_out[15:8] : oam_data_out[7:0];
-    //assign oam_we = (addr_in_oam)&(wr)&(oam_access_ext);
-    assign oam_we = (addr_in_oam)&(wr); // What if always allow OAM access?
-    
+    //assign oam_we = (wr)&(oam_access_ext);
+    assign oam_we = oam_wr; // What if always allow OAM access?
+    assign oam_dout = (oam_access_ext) ? (oam_data_out_byte) : (8'hFF);
+
     // 8 bit WR, 8 bit RD, 8KB VRAM
     wire        vram_we;
     wire [12:0] vram_addr;
     wire [7:0]  vram_data_in;
     wire [7:0]  vram_data_out;
-    
+
     singleport_ram #(
         .WORDS(8192)
     ) br_vram (
@@ -188,14 +202,15 @@ module ppu(
         .addra(vram_addr[12:0]),
         .dina(vram_data_in),
         .douta(vram_data_out));
-        
-    assign vram_addr_ext = a[12:0];
+
+    assign vram_addr_ext = vram_a[12:0];
     assign vram_addr = (vram_access_ext) ? (vram_addr_ext) : (vram_addr_int);
-    assign vram_data_in = din;
-    assign vram_we = (addr_in_vram)&(wr)&(vram_access_ext);
-    
+    assign vram_data_in = vram_din;
+    assign vram_we = (vram_wr)&(vram_access_ext);
+    assign vram_dout = (vram_access_ext) ? (vram_data_out) : (8'hFF);
+
     // Pixel Pipeline
-    
+
     // The pixel FIFO: 16 pixels, 4 bits each (2 bits color index, 2 bits palette index)
     // Since in and out are 8 pixels aligned, it can be modeled as a ping-pong buffer
     // of two 32 bits (8 pixels * 4 bits) group
@@ -212,7 +227,7 @@ module ppu(
                              (pf_output_pixel_id == 2'b10) ? (pf_output_palette[5:4]) :
                              (pf_output_pixel_id == 2'b01) ? (pf_output_palette[3:2]) :
                              (pf_output_pixel_id == 2'b00) ? (pf_output_palette[1:0]) : (2'b00);
-    reg [2:0] pf_empty; // Indicate if the Pixel FIFO is empty. 
+    reg [2:0] pf_empty; // Indicate if the Pixel FIFO is empty.
     localparam PF_INITA = 3'd5; // When a line start...
     localparam PF_INITB = 3'd4; // Line start, 2 pixels out, 8 rendered
     localparam PF_EMPTY = 3'd3; // When the pipeline get flushed
@@ -222,7 +237,7 @@ module ppu(
 
     assign cpl = ~clk;
     //assign pixel = pf_output_pixel;
-    
+
     // HV Timing
     localparam PPU_H_FRONT  = 9'd76;
     localparam PPU_H_SYNC   = 9'd4;    // So front porch + sync = OAM search
@@ -232,16 +247,16 @@ module ppu(
     localparam PPU_H_OUTPUT = 8'd168;
     localparam PPU_V_ACTIVE = 8'd144;
     localparam PPU_V_BACK   = 8'd9;
-    localparam PPU_V_SYNC   = 8'd1;  
+    localparam PPU_V_SYNC   = 8'd1;
     localparam PPU_V_BLANK  = 8'd10;
     localparam PPU_V_TOTAL  = 8'd154;
-   
+
     // Raw timing counter
     reg [8:0] h_count;
     reg [7:0] v_count;
-    
+
     // HV counter
-    always @(posedge clk, posedge rst)
+    always @(posedge clk)
     begin
         if (rst) begin
             h_count <= 0;
@@ -267,11 +282,11 @@ module ppu(
                 hs <= 1;
             if(h_count == PPU_H_FRONT + PPU_H_SYNC - 1)
                 hs <= 0;
-        end 
+        end
     end
-    
+
     // Render FSM
-    localparam S_IDLE     = 5'd0; 
+    localparam S_IDLE     = 5'd0;
     localparam S_BLANK    = 5'd1;  // H Blank and V Blank
     localparam S_OAMX     = 5'd2;  // OAM Search X check
     localparam S_OAMY     = 5'd3;  // OAM Search Y check
@@ -291,7 +306,7 @@ module ppu(
     localparam S_OFRD1A   = 5'd17; // Object Fetch Read Data 1 Stage A
     localparam S_OFRD1B   = 5'd18; // Object Fetch Read Data 1 Stage B
     localparam S_OWB      = 5'd19; // Object Write Back
-    
+
     localparam PPU_OAM_SEARCH_LENGTH = 6'd40;
 
     reg [2:0] h_drop; //Drop pixels when SCX % 8 != 0
@@ -307,22 +322,22 @@ module ppu(
     reg [4:0] r_next_backup;
     reg [4:0] r_next_state;
     wire is_in_v_blank = ((v_count >= PPU_V_ACTIVE) && (v_count < PPU_V_ACTIVE + PPU_V_BLANK));
-    
+
     reg window_triggered; // Indicate whether window has been triggered, should be replaced by a edge detector
     wire render_window_or_bg = window_triggered;
     wire window_trigger = (((h_pix_output) == (reg_wx))&&(v_pix >= reg_wy)&&(reg_win_en)&&(~window_triggered)) ? 1 : 0;
-    
+
     wire [2:0] line_to_tile_v_offset_bg = v_pix_in_map[2:0]; // Current line in a tile being rendered
     wire [4:0] line_in_tile_v_bg = v_pix_in_map[7:3]; // Current tile Y coordinate being rendered
     wire [2:0] line_to_tile_v_offset_win = v_pix_in_win[2:0];
     wire [4:0] line_in_tile_v_win = v_pix_in_win[7:3];
     wire [2:0] line_to_tile_v_offset = (render_window_or_bg) ? (line_to_tile_v_offset_win) : (line_to_tile_v_offset_bg);
     wire [4:0] line_in_tile_v = (render_window_or_bg) ? (line_in_tile_v_win) : (line_in_tile_v_bg);
-    
+
     wire [4:0] h_tile_bg = h_pix_render[7:3] + reg_scx[7:3]; // Current tile X coordinate being rendered
     wire [4:0] h_tile_win = h_pix_render[7:3];
-    wire [4:0] h_tile = (render_window_or_bg) ? (h_tile_win) : (h_tile_bg);  
-    
+    wire [4:0] h_tile = (render_window_or_bg) ? (h_tile_win) : (h_tile_bg);
+
     wire [12:0] current_map_address = (((render_window_or_bg) ? (window_map_addr) : (bg_map_addr)) + (line_in_tile_v) * 32 + {8'd0, h_tile}); //Background address
     reg [7:0] current_tile_id;
     wire [7:0] current_tile_id_adj = {~((reg_bg_win_data_sel)^(current_tile_id[7])), current_tile_id[6:0]}; // Adjust for 8800 Adressing mode
@@ -330,7 +345,7 @@ module ppu(
     wire [12:0] current_tile_address_1 = (current_tile_address_0) | 13'h0001;
     reg [7:0] current_tile_data_0;
     reg [7:0] current_tile_data_1;
-   
+
     // Data that will be pushed into pixel FIFO
     // Organized in pixels
     reg [31:0] current_fetch_result;
@@ -342,14 +357,14 @@ module ppu(
             current_fetch_result[i*4+0] = PPU_PAL_BG[0];
         end
     end
-    
+
     reg [5:0] oam_search_count; // Counter during OAM search stage
     reg [5:0] obj_visible_list [0:9]; // Total visible list
     reg [7:0] obj_trigger_list [0:9]; // Where the obj should be triggered
     reg [7:0] obj_y_list [0:9]; // Where the obj is
     reg obj_valid_list [0:9]; // Is obj visible entry valid
     reg [3:0] oam_visible_count; // ???
-    
+
     wire [7:0] oam_search_x;
     wire [7:0] oam_search_y;
     wire [7:0] obj_size_h = (reg_obj_size == 1'b1) ? (8'd16) : (8'd8);
@@ -357,9 +372,9 @@ module ppu(
     wire [7:0] obj_h_lower_boundary = obj_h_upper_boundary - obj_size_h;
 
     reg [3:0] obj_trigger_id; // The object currently being/ or have been rendered, in the visible list
-        
-    localparam OBJ_TRIGGER_NOT_FOUND = 4'd15; 
-    
+
+    localparam OBJ_TRIGGER_NOT_FOUND = 4'd15;
+
     // Cascade mux used to implement the searching of next id would be triggered
     reg [3:0] obj_trigger_id_from[0:10];
     reg [3:0] obj_trigger_id_next;
@@ -367,7 +382,7 @@ module ppu(
         obj_trigger_id_from[10] = OBJ_TRIGGER_NOT_FOUND; // There is no more after the 10th
         for (i = 9; i >= 0; i = i - 1) begin
             /* verilator lint_off WIDTH */
-            obj_trigger_id_from[i] = 
+            obj_trigger_id_from[i] =
                 ((h_pix_obj == obj_trigger_list[i])&&(obj_valid_list[i])) ? (i) : (obj_trigger_id_from[i+1]);
                 // See if this one match, if not, cascade down.
             /* verilator lint_on WIDTH */
@@ -377,13 +392,13 @@ module ppu(
         else
             obj_trigger_id_next = obj_trigger_id_from[obj_trigger_id + 1]; // Search start from next one
     end
-    
+
     //!-- DEBUG --
     //wire [3:0] obj_trigger_id_next = ((h_pix_obj == obj_trigger_list[4'd0])&&(obj_valid_list[4'd0])) ? (4'd0) : (4'd15);
-    
+
     wire obj_trigger = ((reg_obj_en)&&(obj_trigger_id_next != OBJ_TRIGGER_NOT_FOUND)) ? 1 : 0;
     //wire obj_trigger = 0;
-    
+
     wire [5:0] obj_triggered = obj_visible_list[obj_trigger_id]; // The global id of object being rendered
     wire [7:0] current_obj_y = obj_y_list[obj_trigger_id];
     wire [7:0] current_obj_x = obj_trigger_list[obj_trigger_id]; //h_pix gets incremented before render
@@ -397,17 +412,17 @@ module ppu(
     /* verilator lint_off WIDTH */
     wire [3:0] line_to_obj_v_offset_raw = (v_pix + 8'd16 - current_obj_y); // Compensate 16 pixel offset and truncate to 4 bits
     /* verilator lint_on WIDTH */
-    wire [7:0] current_obj_tile_id = (reg_obj_size == 1'b1) ? 
+    wire [7:0] current_obj_tile_id = (reg_obj_size == 1'b1) ?
         ({current_obj_tile_id_raw[7:1], (((line_to_obj_v_offset_raw[3])^(current_obj_y_flip)) ? 1'b1 : 1'b0)}) : // Select Hi or Lo tile
         (current_obj_tile_id_raw); // Use tile ID directly
     wire [2:0] line_to_obj_v_offset = (current_obj_y_flip) ? (~line_to_obj_v_offset_raw[2:0]) : (line_to_obj_v_offset_raw[2:0]);
-    
+
     wire [12:0] current_obj_address_0 = current_obj_tile_id * 16 + line_to_obj_v_offset * 2;
     wire [12:0] current_obj_address_1 = current_obj_address_0 | 13'h0001;
     reg [7:0] current_obj_tile_data_0;
     reg [7:0] current_obj_tile_data_1;
     // Data that will be merged into pixel FIFO
-    // Organized in pixels 
+    // Organized in pixels
     reg [31:0] merge_result;
     always@(*) begin
         for (i = 0; i < 8; i = i + 1) begin
@@ -415,11 +430,11 @@ module ppu(
                     ((current_obj_tile_data_1[i] != 1'b0)||(current_obj_tile_data_0[i] != 1'b0))&&
                     ((pf_data[32+i*4+1] == PPU_PAL_BG[1])&&(pf_data[32+i*4+0] == PPU_PAL_BG[0]))&&
                     (
-                        ((current_obj_to_bg_priority)&&(pf_data[32+i*4+3] == 1'b0)&&(pf_data[32+i*4+2] == 1'b0))|| 
+                        ((current_obj_to_bg_priority)&&(pf_data[32+i*4+3] == 1'b0)&&(pf_data[32+i*4+2] == 1'b0))||
                         (~current_obj_to_bg_priority)
                     )
                 ) //(OBJ is not transparent) and ((BG priority and BG is transparent) or (OBJ priority))
-            begin 
+            begin
                 merge_result[i*4+3] = current_obj_tile_data_1[i];
                 merge_result[i*4+2] = current_obj_tile_data_0[i];
                 merge_result[i*4+1] = current_obj_pal[1];
@@ -433,21 +448,21 @@ module ppu(
             end
         end
     end
-    
-    assign vram_addr_int_sel = 
+
+    assign vram_addr_int_sel =
         ((r_state == S_OAMRDB) || (r_state == S_OFRD0A) || (r_state == S_OFRD0B)
             || (r_state == S_OFRD1A) || (r_state == S_OFRD1B)) ? 1'b1 : 1'b0;
-        
-    
+
+
     // Current mode logic, based on current state
-    always @ (posedge clk, posedge rst)
+    always @ (posedge clk)
     begin
         if (rst) begin
             reg_stat[1:0] <= PPU_MODE_V_BLANK;
         end
         else begin
             case (r_state)
-            S_IDLE: reg_stat[1:0] <= PPU_MODE_V_BLANK;
+            S_IDLE: reg_stat[1:0] <= (reg_lcd_en) ? (PPU_MODE_V_BLANK) : (PPU_MODE_H_BLANK);
             S_BLANK: reg_stat[1:0] <= (is_in_v_blank) ? (PPU_MODE_V_BLANK) : (PPU_MODE_H_BLANK);
             S_OAMX: reg_stat[1:0] <= PPU_MODE_OAM_SEARCH;
             S_OAMY: reg_stat[1:0] <= PPU_MODE_OAM_SEARCH;
@@ -479,7 +494,7 @@ module ppu(
     always @(posedge clk)
     begin
         reg_ly <= v_pix[7:0];
-        
+
         case (r_state)
             // nothing to do for S_IDLE
             S_IDLE: begin end
@@ -536,7 +551,7 @@ module ppu(
             S_OFRD0B:
                 if (current_obj_x_flip == 1'b1)
                     current_obj_tile_data_0[7:0] <= {
-                        vram_data_out[0], vram_data_out[1], vram_data_out[2], vram_data_out[3], 
+                        vram_data_out[0], vram_data_out[1], vram_data_out[2], vram_data_out[3],
                         vram_data_out[4], vram_data_out[5], vram_data_out[6], vram_data_out[7]
                     };
                 else
@@ -545,7 +560,7 @@ module ppu(
             S_OFRD1B:
                 if (current_obj_x_flip == 1'b1)
                     current_obj_tile_data_1[7:0] <= {
-                        vram_data_out[0], vram_data_out[1], vram_data_out[2], vram_data_out[3], 
+                        vram_data_out[0], vram_data_out[1], vram_data_out[2], vram_data_out[3],
                         vram_data_out[4], vram_data_out[5], vram_data_out[6], vram_data_out[7]
                     };
                 else
@@ -557,7 +572,7 @@ module ppu(
             end
         endcase
     end
-    
+
     reg [31:0] half_merge_result;
     always @(current_fetch_result, pf_data) begin
         for (i = 0; i < 8; i = i + 1) begin
@@ -575,7 +590,7 @@ module ppu(
             end
         end
     end
-    
+
     // Output logic
     always @(posedge clk)
     begin
@@ -583,12 +598,12 @@ module ppu(
             valid <= 1'b0;
             h_pix_output <= 8'd0; // Output pointer
             h_drop <= reg_scx[2:0];
-            pf_empty <= PF_INITA; 
+            pf_empty <= PF_INITA;
         end
         else if ((r_state == S_FTIDA) || (r_state == S_FTIDB) || (r_state == S_FRD0A) || (r_state == S_FRD0B) ||
             (r_state == S_FRD1A) || (r_state == S_FRD1B) || (r_state == S_FWAITA) || (r_state == S_FWAITB))
         begin
-        
+
             if (r_state == S_FRD1B) begin
                 if (pf_empty == PF_INITA) pf_empty <= PF_INITB;
                 if (pf_empty == PF_INITB) pf_empty <= PF_FIN;
@@ -596,7 +611,7 @@ module ppu(
                 if (pf_empty == PF_HALF) pf_empty <= PF_FIN;
             end else
                 if (pf_empty == PF_FIN) pf_empty <= PF_FULL; // should NOT wait through end
-            
+
             // If it is in one of the output stages
             if (pf_empty == PF_EMPTY) begin
                 // Just started, no data available
@@ -611,7 +626,7 @@ module ppu(
                 end
             end
             else if (((pf_empty == PF_INITA)&&((r_state == S_FRD1A)||(r_state == S_FRD1B)))
-                    ||(pf_empty == PF_INITB)||(pf_empty == PF_FULL)||(pf_empty == PF_FIN)) begin 
+                    ||(pf_empty == PF_INITB)||(pf_empty == PF_FULL)||(pf_empty == PF_FIN)) begin
                 if (r_state == S_FTIDA) begin // reload and shift
                     if (pf_empty == PF_INITB) begin
                         pf_data[63:0] <= {20'b0, current_fetch_result[31:0], 12'b0};
@@ -623,7 +638,7 @@ module ppu(
                 else begin // just shift
                     pf_data <= {pf_data[59:0], 4'b0};
                 end
-                
+
                 if (h_drop != 3'd0) begin
                     h_drop <= h_drop - 1'd1;
                     valid <= 0;
@@ -648,7 +663,7 @@ module ppu(
             valid <= 1'b0;
         end
         else if (r_state == S_SWW) begin
-            pf_empty <= PF_EMPTY;  // Flush the pipeline 
+            pf_empty <= PF_EMPTY;  // Flush the pipeline
             valid <= 1'b0;
         end
         else begin
@@ -660,7 +675,7 @@ module ppu(
     // Enter Next State
     // and handle object interrupt
     // (sorry but I need to backup next state so I could not handle these in the next state logic)
-    always @(posedge clk, posedge rst)
+    always @(posedge clk)
     begin
         if (rst) begin
             //h_pix_obj <= 8'b0;
@@ -676,7 +691,7 @@ module ppu(
                     (r_state == S_OFRD1A)||(r_state == S_OFRD1B)||
                     (r_state == S_OAMRDA)||(r_state == S_OAMRDB)) begin
                     r_state <= r_next_state;
-                end 
+                end
                 // Finished one object, but there is more
                 else if (r_state == S_OWB) begin
                     r_state <= S_OAMRDA;
@@ -699,21 +714,21 @@ module ppu(
             end
         end
     end
-    
+
     // Next State Logic
     // Since new state get updated during posedge
     always @(*)
     begin
         case (r_state)
             S_IDLE: r_next_state = ((reg_lcd_en)&(is_in_v_blank)) ? (S_BLANK) : (S_IDLE);
-            S_BLANK: r_next_state = 
+            S_BLANK: r_next_state =
                 (reg_lcd_en) ? (
-                    (is_in_v_blank) ? 
+                    (is_in_v_blank) ?
                         (((v_count == (PPU_V_TOTAL - 1))&&(h_count == (PPU_H_TOTAL - 1))) ?
                             (S_OAMX) : (S_BLANK)
                         ) :
-                        ((h_count == (PPU_H_TOTAL - 1)) ? 
-                            ((v_count == (PPU_V_ACTIVE - 1)) ? 
+                        ((h_count == (PPU_H_TOTAL - 1)) ?
+                            ((v_count == (PPU_V_ACTIVE - 1)) ?
                                 (S_BLANK) : (S_OAMX)):
                             (S_BLANK)
                         )
@@ -739,16 +754,16 @@ module ppu(
             default: r_next_state = S_IDLE;
         endcase
     end
-    
+
     // Interrupt
-    always @(posedge clk, posedge rst)
+    always @(posedge clk)
         if (rst)
             reg_stat[2] <= 0;
         else
             // TODO: what's the timing for this?
             reg_stat[2] <= (reg_ly == reg_lyc) ? 1 : 0;
-            
-    always @(posedge clk, posedge rst)
+
+    always @(posedge clk)
     begin
         if (rst) begin
             int_vblank_req <= 0;
@@ -773,46 +788,31 @@ module ppu(
             reg_mode_last <= reg_mode;
         end
     end
-    
+
     // Bus RW
     // Bus RW - Combinational Read
     always @(*)
     begin
-        dout = 8'hFF;
-        if (addr_in_ppu) begin
-            case (a)
-                16'hFF40: dout = reg_lcdc;
-                16'hFF41: dout = reg_stat;
-                16'hFF42: dout = reg_scy;
-                16'hFF43: dout = reg_scx;
-                16'hFF44: dout = reg_ly;
-                16'hFF45: dout = reg_lyc;
-                16'hFF46: dout = reg_dma;
-                16'hFF47: dout = reg_bgp;
-                16'hFF48: dout = reg_obp0;
-                16'hFF49: dout = reg_obp1;
-                16'hFF4A: dout = reg_wy;
-                16'hFF4B: dout = reg_wx;
-            endcase
-        end
-        else
-        if (addr_in_vram) begin
-            if (vram_access_ext)
-            begin
-                dout = vram_data_out;
-            end
-        end
-        else
-        if (addr_in_oam) begin
-            if (oam_access_ext)
-            begin
-                dout = oam_data_out_byte;
-            end
-        end
+        // MMIO Bus
+        mmio_dout = 8'hFF;
+        case (mmio_a)
+            16'hFF40: mmio_dout = reg_lcdc;
+            16'hFF41: mmio_dout = reg_stat;
+            16'hFF42: mmio_dout = reg_scy;
+            16'hFF43: mmio_dout = reg_scx;
+            16'hFF44: mmio_dout = reg_ly;
+            16'hFF45: mmio_dout = reg_lyc;
+            16'hFF46: mmio_dout = reg_dma;
+            16'hFF47: mmio_dout = reg_bgp;
+            16'hFF48: mmio_dout = reg_obp0;
+            16'hFF49: mmio_dout = reg_obp1;
+            16'hFF4A: mmio_dout = reg_wy;
+            16'hFF4B: mmio_dout = reg_wx;
+        endcase
     end
-    
+
     // Bus RW - Sequential Write
-    always @(posedge clk, posedge rst)
+    always @(posedge clk)
     begin
         if (rst) begin
             reg_lcdc <= 8'h00;
@@ -829,31 +829,31 @@ module ppu(
         end
         else
         begin
-            if (wr) begin
-                if (addr_in_ppu) begin
-                    case (a)
-                        16'hFF40: reg_lcdc <= din;
-                        16'hFF41: reg_stat[7:3] <= din[7:3];
-                        16'hFF42: reg_scy <= din;
-                        16'hFF43: reg_scx <= din;
-                        //16'hFF44: reg_ly <= din;
-                        16'hFF45: reg_lyc <= din;
-                        16'hFF46: reg_dma <= din;
-                        16'hFF47: reg_bgp <= din;
-                        16'hFF48: reg_obp0 <= din;
-                        16'hFF49: reg_obp1 <= din;
-                        16'hFF4A: reg_wy <= din;
-                        16'hFF4B: reg_wx <= din;
-                    endcase
-                end
-                // VRAM and OAM access should be completed automatically 
+            if (mmio_wr) begin
+                case (mmio_a)
+                    16'hFF40: reg_lcdc <= mmio_din;
+                    16'hFF41: reg_stat[7:3] <= mmio_din[7:3];
+                    16'hFF42: reg_scy <= mmio_din;
+                    16'hFF43: reg_scx <= mmio_din;
+                    //16'hFF44: reg_ly <= mmio_din;
+                    16'hFF45: reg_lyc <= mmio_din;
+                    16'hFF46: reg_dma <= mmio_din;
+                    16'hFF47: reg_bgp <= mmio_din;
+                    16'hFF48: reg_obp0 <= mmio_din;
+                    16'hFF49: reg_obp1 <= mmio_din;
+                    16'hFF4A: reg_wy <= mmio_din;
+                    16'hFF4B: reg_wx <= mmio_din;
+                endcase
+                // VRAM and OAM access are not handled here
             end
         end
     end
-    
+
     // Debug Outputs
     assign scx = reg_scx;
     assign scy = reg_scy;
     assign state = r_state;
+    assign d_reg_lcdc = reg_lcdc;
+    assign d_reg_stat = reg_stat;
 
 endmodule

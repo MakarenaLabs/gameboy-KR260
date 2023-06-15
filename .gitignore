@@ -26,3 +26,6 @@
 # Ignore Vivado file backups
 *~
 *#
+
+project/_project_1
+project/project_1

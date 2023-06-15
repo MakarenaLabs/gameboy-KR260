@@ -1,17 +1,17 @@
-`timescale 1ns / 1ps
+`timescale 1ns / 1ns
 `default_nettype wire
 ////////////////////////////////////////////////////////////////////////////////
-// Company: 
+// Company:
 // Engineer: Wenting Zhang
-// 
-// Create Date:    17:30:26 02/08/2018 
+//
+// Create Date:    17:30:26 02/08/2018
 // Module Name:    cpu
 // Project Name:   VerilogBoy
-// Description: 
+// Description:
 //   The Game Boy CPU.
-// Dependencies: 
-// 
-// Additional Comments: 
+// Dependencies:
+//
+// Additional Comments:
 //   See doc/cpu_internal.md for signal definitions
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -19,6 +19,7 @@ module cpu(
     input clk,
     input rst,
     output reg phi,
+    output wire [1:0] ct,
     output reg [15:0] a,
     output reg [7:0] dout,
     input [7:0] din,
@@ -29,12 +30,17 @@ module cpu(
     output wire [4:0] int_flags_out,
     input [7:0] key_in,
     output reg done,
-    output wire fault
+    output wire fault,
+
+    output wire [7:0] d_opcode,
+    output wire [15:0] d_pc,
+    output wire [15:0] d_last_pc
     );
 
     reg  [7:0]  opcode;
     reg  [7:0]  cb;
     wire [2:0]  m_cycle;
+    reg  [2:0]  m_cycle_early;
     wire [1:0]  alu_src_a;
     wire [2:0]  alu_src_b;
     wire        alu_src_xchg;
@@ -102,7 +108,7 @@ module cpu(
 
     wire [3:0]  flags_rd;
     wire [3:0]  flags_wr;
-        
+
     wire [7:0]  db_wr; // Data into buffer
     wire [7:0]  db_rd; // Data out from buffer
     wire        db_we;
@@ -138,7 +144,8 @@ module cpu(
         .opcode_early(opcode),
         .cb(cb),
         .imm(imm_low),
-        .m_cycle(m_cycle),
+        .m_cycle_early(m_cycle_early),
+        .ct_state(ct_state),
         .f_z(flags_rd[3]),
         .f_c(flags_rd[0]),
         .alu_src_a(alu_src_a_ex),
@@ -174,24 +181,27 @@ module cpu(
         .wake(wake),
         .fault(fault)
     );
-    
+
     always @(posedge clk) begin
-        done <= stop | halt | fault; 
+        done <= stop | halt | fault;
         // only used to stop simulation if needed
         // and delay 1 clk
     end
 
-    wire wake_comb = 
+    wire wake_comb =
         // Any enabled interrupt can wake up halted CPU, IME doesn't matter
         (halt) ? ((int_flags_in & int_en) != 0) : (
         // Any enabled interrupt and any keypress can wake up stopped CPU
         // IME doesn't matter. Though the typical usage is clear the IE before
         // entering STOP mode, so only keypad can wake up the CPU.
-        (stop) ? (((int_flags_in & int_en) != 0) || (key_in != 0)) : 
+        (stop) ? (((int_flags_in & int_en) != 0) || (key_in != 0)) :
         (1'b0));
+    reg wake_delay; // Wake should be delayed for 1 Mcycle
     always @(posedge clk) begin
-        if (ct_state == 2'b10)
-            wake <= wake_comb;
+        if (ct_state == 2'b10) begin
+            wake_delay <= wake_comb;
+            wake <= wake_delay;
+        end
     end
 
     wire [7:3] current_opcode;
@@ -199,7 +209,7 @@ module cpu(
     // Data Bus Buffer
     reg [7:0] db_wr_buffer;
     reg [7:0] db_rd_buffer;
-    
+
     // Logic: if buffer is selected, use the data in the buffer,
     // otherwise the buffer is overrided.
     always @(posedge clk) begin
@@ -224,7 +234,7 @@ module cpu(
 
     // Interrupt
     wire [4:0] int_flags_masked = int_flags_in & int_en & {5{int_master_en}};
-    wire [4:0] int_flags_out_cleared = 
+    wire [4:0] int_flags_out_cleared =
         (int_flags_masked[0]) ? (int_flags_in & 5'b11110) : (
         (int_flags_masked[1]) ? (int_flags_in & 5'b11101) : (
         (int_flags_masked[2]) ? (int_flags_in & 5'b11011) : (
@@ -233,7 +243,7 @@ module cpu(
             int_flags_in
         )))));
 
-    assign int_flags_out = 
+    assign int_flags_out =
         ((int_dispatch)&&(pc_we)) ? (int_flags_out_cleared) : (int_flags_in);
 
     // Regisiter file
@@ -258,7 +268,7 @@ module cpu(
     assign rf_rdn = rf_rd_sel;
     assign rf_rdwn = rf_rdw_sel;
     assign rf_rd = (!temp_redir) ? (rf_rd_raw) : ((rf_rd_sel[0]) ? (temp_rd[7:0]) : (temp_rd[15:8]));
-    always@(posedge clk, posedge rst) begin
+    always@(posedge clk) begin
         if (rst)
             rf_rd_ex <= 8'b0;
         else
@@ -275,9 +285,9 @@ module cpu(
         .we(acc_we),
         .rd(acc_rd)
     );
-    assign acc_wr = ((db_src == 2'b00) && (bus_op == 2'b11)) ? (imm_reg[7:0]) : (alu_result); 
+    assign acc_wr = ((db_src == 2'b00) && (bus_op == 2'b11)) ? (imm_reg[7:0]) : (alu_result);
     assign acc_we = ((alu_dst == 2'b00) || ((db_src == 2'b00) && (bus_op == 2'b11)));
-    
+
     // Register PC
     reg [15:0] pc;
     reg [15:0] last_pc;
@@ -289,20 +299,20 @@ module cpu(
         (pc_src == 2'b01) ? ({10'b00, opcode[5:3], 3'b000}) : (
         (pc_src == 2'b10) ? (temp_rd) : (
         (pc_src == 2'b11) ? (16'b0) : (16'b0)))));
-    wire [15:0] pc_int = 
+    wire [15:0] pc_int =
         (int_flags_masked[0]) ? (16'h0040) : (
         (int_flags_masked[1]) ? (16'h0048) : (
         (int_flags_masked[2]) ? (16'h0050) : (
         (int_flags_masked[3]) ? (16'h0058) : (
         (int_flags_masked[4]) ? (16'h0060) : (
-            // no interrupts anymore ??? We havn't cleared it yet!
-            // This should not happen [TM]
-            // Cancel interrupt dispatch
-            pc_rd
+            // no interrupts anymore, dispatching is cancelled.
+            // jump to 0000 instead
+            // this behavior is tested by acceptence/interrupts/ie_push
+            16'h0000
         )))));
     assign pc_we_l = ((alu_dst == 2'b01) && (pc_b_sel == 1'b0)) ? (1'b1) : (1'b0);
     assign pc_we_h = ((alu_dst == 2'b01) && (pc_b_sel == 1'b1)) ? (1'b1) : (1'b0);
-    always @(posedge clk, posedge rst) begin
+    always @(posedge clk) begin
         if (rst)
             pc <= 16'b0;
         else begin
@@ -336,7 +346,7 @@ module cpu(
         .rd(flags_rd)
     );*/
     reg [3:0] flags;
-    always @(posedge clk, posedge rst) begin
+    always @(posedge clk) begin
         if (rst)
             flags <= 4'b0;
         else if (flags_we)
@@ -351,7 +361,7 @@ module cpu(
     end
     assign flags_rd = flags;
     assign flags_wr = alu_flags_out;
-    
+
 
     // ALU
     wire [2:0] alu_op_mux;
@@ -402,12 +412,14 @@ module cpu(
     wire [1:0] ct_next_state;
 
     assign ct_next_state = ct_state + 2'b01;
-    always @(posedge clk, posedge rst) begin
+    always @(posedge clk) begin
         if (rst)
             ct_state <= 2'b00;
         else
             ct_state <= ct_next_state;
     end
+
+    assign ct = ct_state;
 
     //reg [15:0] imm_reg; decleared before
     assign temp_rd = imm_reg;
@@ -415,8 +427,8 @@ module cpu(
     assign imm_ext = {8{imm_reg[7]}};
     assign imm_abs = (imm_reg[7]) ? (~imm_reg[7:0] + 1'b1) : (imm_reg[7:0]);
 
-    // CT - FSM / Bus Operation 
-    always @(posedge clk, posedge rst) begin
+    // CT - FSM / Bus Operation
+    always @(posedge clk) begin
         if (rst) begin
             a <= 16'b0;
             rd <= 1'b0;
@@ -457,15 +469,6 @@ module cpu(
                     // Instruction Fetch Cycle
                     wr <= 0;
                     opcode <= din;
-                    // Interrupt dispatch happens here
-                    // Guarenteed if it is at instruction fetch cycle,
-                    // It is at instruction boundaries,
-                    // and m_cycle will start from 0.
-                    if ((!int_dispatch) && (int_flags_masked != 0) && (int_master_en))
-                        int_dispatch <= 1'b1;
-                    else if ((int_dispatch) && (int_ack)) begin
-                        int_dispatch <= 1'b0;
-                    end
                 end
                 else if (bus_op == 2'b11) begin
                     // Data Read cycle
@@ -474,13 +477,23 @@ module cpu(
                     if ((opcode == 8'hCB) && (m_cycle == 0)) cb <= din[7:0];
                     // mcycle is slower
                     if (m_cycle == 3'd0) imm_reg[7:0] <= din;
-                    else if (m_cycle == 3'd1) imm_reg[15:8] <= din; 
+                    else if (m_cycle == 3'd1) imm_reg[15:8] <= din;
                 end
                 else begin
                     wr <= 0;
                 end
                 rd <= 0;
                 phi <= 0;
+
+                // Interrupt dispatch happens here
+                // Guarenteed if it is at instruction fetch cycle,
+                // It is at instruction boundaries,
+                // and m_cycle will start from 0.
+                if ((!int_dispatch) && (int_flags_masked != 0) && (int_master_en) && ((bus_op == 2'b01) || (halt == 1'b1)))
+                    int_dispatch <= 1'b1;
+                else if ((int_dispatch) && (int_ack)) begin
+                    int_dispatch <= 1'b0;
+                end
             end
             2'b11: begin
                 // Bus Idle
@@ -500,9 +513,9 @@ module cpu(
     reg  [1:0] alu_dst_ct;
     reg  [2:0] rf_wr_sel_ct;
     reg  [2:0] rf_rd_sel_ct;
-    reg        pc_b_sel_ct; 
-      
- 
+    reg        pc_b_sel_ct;
+
+
     always @(*) begin
         // Do nothing by default
         alu_src_a_ct = 2'b00;  // From A
@@ -611,9 +624,10 @@ module cpu(
 
     assign ex_next_state = (next) ? (ex_state + 3'd1) : (3'd0);
 
-    always @(posedge clk, posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             ex_state <= 3'd0;
+            m_cycle_early <= 3'd0;
             alu_carry_out_ex <= 1'b0;
             alu_carry_out_ct <= 1'b0;
         end
@@ -621,6 +635,9 @@ module cpu(
             alu_carry_out_ct <= alu_flags_out[0];
             if (ct_state == 2'b11) begin
                 ex_state <= ex_next_state;
+            end
+            else if (ct_state == 2'b10) begin
+                m_cycle_early <= ex_next_state;
             end
             else if (ct_state == 2'b00) begin
                 // Backup flag output
@@ -630,5 +647,9 @@ module cpu(
     end
 
     assign m_cycle = ex_state;
+
+    assign d_opcode = opcode;
+    assign d_pc = pc;
+    assign d_last_pc = last_pc;
 
 endmodule

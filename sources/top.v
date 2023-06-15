@@ -1,4 +1,6 @@
 `timescale 1ns / 1ps
+`default_nettype wire
+
 //////////////////////////////////////////////////////////////////////////////////
 // Company: 
 // Engineer: 
@@ -18,6 +20,7 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
+`define CARTRIDGE
 
 
 module top(
@@ -26,7 +29,7 @@ module top(
     output wire[7:4] vga_r,
     output wire[7:4] vga_g,
     output wire[7:4] vga_b,
-    input  wire reset,
+    input  wire ext_reset,
     input  wire CLK_100MHZ_FPGA,
     //output wire AC_MCLK,
     //output wire AC_ADR0,
@@ -37,30 +40,52 @@ module top(
     //input wire AC_GPIO1,
     //input wire AC_GPIO2,
     //input wire AC_GPIO3,
-    output reg clk_gb,
+    output wire clk_gb,
     output wire[15:0] audio_left,
     output wire[15:0] audio_right,
     
     input wire[7:0] buttons,
     //input wire pause,
     //input wire slow,
-    input wire color_gb
+    input wire color_gb,
+    
+    // physical cartridge
+    output wire[15:0] cartridge_addr,
+    inout wire[7:0] cartridge_data,
+    output wire cartridge_wr,
+    output wire cartridge_rd,
+    output wire cartridge_rst,
+    output wire cartridge_clk,
+    output supply1 cartridge_sel
     );
+    
+    wire[7:0] dummy;
     
     //reg clk_gb;
     wire clk_vga;
     wire clk_gb2;
     wire clk_mem;
+    wire clk_100;
+    wire clk_rr;
+    reg reset = 0;
+    
+
+
     pll pll(
         .clk_mem(clk_mem),
         .clk_vga(clk_vga),
         .clk_gb2(clk_gb2),
+        .clk_100(clk_100),
         .clk_in1(CLK_100MHZ_FPGA)
         //.reset(reset)
     );
+    /*
     always @(posedge clk_gb2)begin
         clk_gb<=~clk_gb;
     end
+    */
+    clock_div #(.DIV_2N(6)) c2 (.clk_in(clk_gb2), .clk_out(clk_gb));
+
     
     wire[23:0] wave_l_24;
     wire[23:0] wave_r_24;
@@ -71,6 +96,7 @@ module top(
     wire [7:0]  vb_din;
     wire        vb_wr;
     wire        vb_rd;
+    //wire        vb_cs;
     
     //Video signal
     wire gb_hs;
@@ -80,6 +106,7 @@ module top(
     wire gb_valid;
     
     wire[7:0] key;
+    
     /*
     anti_vibration btn(
         .mclk(clk_gb),
@@ -89,9 +116,12 @@ module top(
     );
     */
     
+`ifndef CARTRIDGE
+    
     boy boy(
         .rst(reset),
         .clk(clk_gb),
+        .phi(clk_rr),
         .a(vb_a),
         .dout(vb_dout),
         .din(vb_din),
@@ -134,7 +164,7 @@ module top(
    
     wire [7:0] vb_cram_dout;
     wire vb_cram_wr = !vb_ram_cs_n & vb_wr;
-  
+ 
     singleport_ram #(
         .WORDS(32768),
         .ABITS(15)
@@ -145,6 +175,7 @@ module top(
 	    .wea (vb_cram_wr),
 	    .douta (vb_cram_dout)
     );
+
     
     wire [7:0] cartridgeRomOut;
     Cartridge cartridge (
@@ -155,6 +186,66 @@ module top(
     
     assign vb_crom_dout = cartridgeRomOut;
     assign vb_din = (vb_ram_cs_n) ? (vb_crom_dout) : (vb_cram_dout);
+
+`else
+
+    boy boy(
+        .rst(reset),
+        .clk(clk_gb),
+        .phi(clk_rr),
+        .a(vb_a),
+        .dout(vb_dout),
+        .din(vb_din),
+        .wr(vb_wr),
+        .rd(vb_rd),
+        //.cs(vb_cs),
+        .key(buttons),
+        .hs(gb_hs),
+        .vs(gb_vs),
+        .cpl(gb_cpl),
+        .pixel(gb_pixel),
+        .valid(gb_valid),
+        //.left(wave_l_24[20:5]),
+        //.right(wave_r_24[20:5]),
+        .left(audio_left),
+        .right(audio_right),
+        .fault()
+    );
+
+
+    assign cartridge_addr = vb_a;
+    assign cartridge_clk = clk_rr;
+    assign cartridge_wr = ~vb_wr;
+    assign cartridge_rd = ~vb_rd;
+    assign cartridge_rst = ~reset;
+    //assign cartridge_sel = ~vb_cs;
+    assign vb_din = cartridge_data;
+    assign cartridge_data = vb_wr ? vb_dout : 8'bz;
+
+    //https://forums.nesdev.org/viewtopic.php?t=10914
+
+
+    reg[23:0] rst_delay = 24'h000000;
+    reg is_resetting = 0;
+    always @(posedge clk_100) begin
+        if(ext_reset) begin
+            rst_delay = 24'h000000;
+            reset <= 1;
+            is_resetting <= 1;
+        end
+        if(is_resetting) begin
+            if (rst_delay == 24'hffffff) begin
+                reset <= 0;
+                is_resetting <= 0;
+            end
+            else if (rst_delay < 24'hffffff) begin
+                rst_delay <= rst_delay + 1;
+            end
+        end
+    end
+    
+    
+`endif    
     
     /*
     audio_top audio_top(
