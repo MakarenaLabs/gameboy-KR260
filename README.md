@@ -51,9 +51,20 @@ To load a new Game Boy cartridge statically, generate the COE file and load it v
 
 For VGA output, you can use a PMOD VGA adapter. We recommend using [this PMOD VGA adapter](https://digilent.com/shop/pmod-vga-video-graphics-array/) by Digilent. Connect the PMOD VGA adapter to the PMOD 3-4 ports.
 
-The audio output is mapped on PMOD 1 on pin 1 (left channel) and pin 2 (right channel).
+The audio output is mapped on PMOD 2 on pin 1 (left channel) and pin 2 (right channel).
 
 To map the joystick pins, replace the constant IP [0:7] with the desired PMOD pins.
+The joystick mapping is the following:
+- 0: A 
+- 1: SELECT
+- 2: B
+- 3: START
+- 4: DX
+- 5: SX
+- 6: UP
+- 7: DOWN
+
+When the signal is high, a button will trigger an event. If you implement your joystick in pull-up configuration, remember to invert the signal (with a Utility Vector Logic IP for example)
 
 ## License
 
